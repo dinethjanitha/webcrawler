@@ -85,13 +85,16 @@ async def getAllKeywords():
     #     )
     return result
 
-@app.get("/api/v1/crawl")
-async def testTwo(keyword: Union[str,None] = None , domain: Union[str,None] = None):
+@app.post("/api/v1/crawl")
+async def testTwo(keyword: str, url_list: list[str]):
     if not keyword:
-        keyword = "Travel Sri lanka"
-    if not domain :
-        domain = "com"
-    result = await exec(keyword , domain)   
+        keyword = "www.slt.lk"
+
+    print("Url List")
+    print(url_list)
+    # if not domain :
+    #     domain = "com"
+    result = await exec(keyword , url_list)   
 
     return result
 

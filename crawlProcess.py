@@ -472,11 +472,20 @@ async def FullAutoAgent(keywordId: str):
 
 
 # Stored Keyword in mongoDB
-async def storeKeyword(keyword , siteDomain):
-    mydict = {
-        "keyword" : keyword,
-        "siteDomain" : siteDomain,
-    }
+async def storeKeyword(keyword , url_list):
+
+    if  not url_list or len(url_list) == 0:
+        mydict = {
+            "keyword" : keyword,
+            "urls" : url_list,
+        } 
+
+    else : 
+        mydict = {
+            "keyword" : keyword,
+        }
+
+    
     try:
         x = await keyword_collection.insert_one(mydict) 
         print("---x----") 
@@ -505,7 +514,7 @@ async def getKeywordByDomain(url):
             url = "http://" + url
 
         parsed_url = urlparse(url)
-        domain = parsed_url.netloc.replace("www.", "")
+        domain = parsed_url.netloc.replace("www.", "") 
 
         result = await keyword_collection.find_one(
             {"keyword": {"$regex": domain, "$options": "i"}}
@@ -520,26 +529,29 @@ async def getKeywordByDomain(url):
 
 
 # Add urls to keyword document
-async def storeRelevantUrls(keywordId):
+async def storeRelevantUrls(keywordId , urls_list):
     
     try:
         keywordDetails = await getKeywordById(keywordId)
         
         keyword = keywordDetails["keyword"]
-        siteDomain = keywordDetails["siteDomain"]
+        # siteDomain = keywordDetails["siteDomain"]
 
-        results = googlesearch(keyword , siteDomain)
+        # results = googlesearch(keyword , siteDomain)
 
-        urlList = []
+        # urlList = []
 
-        for item in results.get("items", []):
-            print(f"Title: {item['title']}")
-            urlList.append(item['link'])
-            print(f"Link: {item['link']}\n")
+        # for item in results.get("items", []):
+        #     print(f"Title: {item['title']}")
+        #     urlList.append(item['link'])
+        #     print(f"Link: {item['link']}\n")
 
-        print(urlList)
+        print(urls_list)
 
-        updatedValues = await keyword_collection.update_one({"_id" : ObjectId(keywordId)} , {"$set" : {"urls" : urlList}})
+        updatedValues = await keyword_collection.update_one(
+            {"_id": ObjectId(keywordId)},
+            {"$push": {"urls": {"$each": urls_list}}}
+        )
         print("Updated Values")
         print(updatedValues)
 
@@ -656,7 +668,7 @@ async def summarizeUsingAgent(keywordId):
         return None
 
 
-async def exec(keyword , domain):
+async def exec(keyword , url_list):
     """
     Complete workflow:
     1. Store keyword
@@ -670,29 +682,32 @@ async def exec(keyword , domain):
     print("STEP 1.1: Check keyword")
     print("=" * 80)
     
+    
+        
     result = await getKeywordByDomain(keyword)
-
+    
     if not result : 
         print("\n" + "=" * 80)
         print("STEP 1.2: Storing keyword")
         print("=" * 80)
-        domain = "com"
-        storedKeyword = await storeKeyword(keyword, domain)
+        storedKeyword = await storeKeyword(keyword, url_list)
         storedKeywordId = storedKeyword.inserted_id
         print(f"Keyword stored with ID: {storedKeywordId}")
+
+        # if url_list and len(url_list) > 0:
+        #     updatedKey = await storeRelevantUrls(storedKeyword.inserted_id , None)
+            
     else : 
         print("Id is founded!")
         print(result["_id"])
         storedKeywordId = result["_id"]
         print("Keyword Already founded! Skip creating new keyword id...")
-
     # Step 2: Get keyword details
     print("\n" + "=" * 80)
     print("STEP 2: Fetching keyword details")
     print("=" * 80)
     resultMongo = await getKeywordById(storedKeywordId)
     keywordId = resultMongo["_id"]
-
     # Step 3: Fetch Google URLs
     # print("\n" + "=" * 80)
     # print("STEP 3: Fetching Google search URLs")
@@ -704,7 +719,6 @@ async def exec(keyword , domain):
     #     return {"error": "Failed to fetch URLs from Google"}
     
     # Get updated details with URLs
-
     print("\n" + "=" * 80)
     print("STEP 3: Checking keyword details")
     print("=" * 80)
@@ -715,9 +729,11 @@ async def exec(keyword , domain):
     #     return {"error": "No URLs found in Google search results"}
     
     url = updatedDetails["keyword"]
+    # url_list = updatedDetails["urls"]
     urls = [url]
-
-
+    if url_list and len(url_list) > 0:
+        urls += url_list
+    
     print(f"Found URL {updatedDetails["keyword"]}  URLs to crawl")
     # for i, url in enumerate(urls, 1):
     #     print(f"   [{i}] {url}")
