@@ -34,12 +34,10 @@ async def getAllDetailsById(id):
             'keyword': {
                 '$first': '$keyword'
             }, 
-            'siteDomain': {
-                '$first': '$siteDomain'
-            }, 
             'urls': {
-                '$first': '$urls'
+                '$first': '$sitesData.siteUrl'
             }, 
+            
             'content': {
                 '$first': '$sitesData.content'
             }, 

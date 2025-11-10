@@ -8,6 +8,7 @@ from googlesearchmethod.googlesearch import googlesearch
 from dotenv import load_dotenv
 import os
 from urllib.parse import urlparse , urlunparse
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 
@@ -18,7 +19,7 @@ from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.tools import tool
 from langchain.agents import create_agent
-
+from langgraph.checkpoint.memory import InMemorySaver
 from bson.objectid import ObjectId
 from model.keyword import keyword_collection
 from model.siteData import siteDataCollection
@@ -92,6 +93,7 @@ async def ReasoningAgent():
     - Discover schema elements (labels, relationship types, property keys) when the user doesn't know exact KG keywords.
     - Generate Cypher queries that use fuzzy/partial matching to find relevant nodes and relationships.
     - Analyze query results and make decisions or summaries using the tool `makeDecisionFromKG`.
+    - Link node by similarity and check again with that and find how relation in it neo4j if you look it as another type make query with it
 
     Tools available:
     1. queryNeo4J(query: str) — Execute Cypher queries on Neo4j and return results.
@@ -159,6 +161,7 @@ async def ReasoningAgent():
         model=llm,
         system_prompt=SYSTEM_PROMPT,
         tools=tools,
+        checkpointer=InMemorySaver()
     )
     return agent
 
@@ -199,7 +202,7 @@ async def test_decision(keywordId: str , user_prompt:str):
             {"role": "user", "content": improved_user_message}
         ]
     },
-    config={"configurable": {"thread_id": "re_1"}
+    config={"configurable": {"thread_id": "thread_1"}
             } 
     )
 
@@ -304,7 +307,11 @@ async def getCrawlContent(keywordId:str) -> str:
     print("\n" + "=" * 80)
     print("STEP 5.*: Getting crawling content from database...")
     print("=" * 80)
-    siteDataResults = await siteDataCollection.find({'keywordId' : ObjectId(keywordId)}).to_list(length=None)
+
+    now = datetime.utcnow()
+    ten_minutes_ago = now - timedelta(minutes=10)
+    
+    siteDataResults = await siteDataCollection.find({'keywordId' : ObjectId(keywordId) , 'createdAt': {'$gte': ten_minutes_ago}  }).to_list(length=None)
     
     content = []
     for document in siteDataResults:
@@ -667,7 +674,6 @@ async def summarizeUsingAgent(keywordId):
         print(f"Summarization error: {e}")
         return None
 
-
 async def exec(keyword , url_list):
     """
     Complete workflow:
@@ -685,7 +691,7 @@ async def exec(keyword , url_list):
     
         
     result = await getKeywordByDomain(keyword)
-    
+    skipSum = False
     if not result : 
         print("\n" + "=" * 80)
         print("STEP 1.2: Storing keyword")
@@ -701,6 +707,7 @@ async def exec(keyword , url_list):
         print("Id is founded!")
         print(result["_id"])
         storedKeywordId = result["_id"]
+        skipSum = True
         print("Keyword Already founded! Skip creating new keyword id...")
     # Step 2: Get keyword details
     print("\n" + "=" * 80)
@@ -732,6 +739,9 @@ async def exec(keyword , url_list):
     # url_list = updatedDetails["urls"]
     urls = [url]
     if url_list and len(url_list) > 0:
+        print("\n" + "=" * 80)
+        print("STEP 3.1: Manual added url fined crawling started with it!")
+        print("=" * 80)
         urls += url_list
     
     print(f"Found URL {updatedDetails["keyword"]}  URLs to crawl")
@@ -768,19 +778,28 @@ async def exec(keyword , url_list):
     print("=" * 80)
     
 
-    finalValue = await summarizeUsingAgent(keywordId)
-    if finalValue == None :
+    if skipSum == False : 
+        finalValue = await summarizeUsingAgent(keywordId)
+        if finalValue == None :
+            return {
+            "status": "Summarization failed!",
+        }
+        print("\n" + "=" * 80)
+        print("WORKFLOW COMPLETED SUCCESSFULLY!")
+        print("=" * 80)
+        
         return {
-        "status": "Summarization failed!",
-    }
-    print("\n" + "=" * 80)
-    print("WORKFLOW COMPLETED SUCCESSFULLY!")
-    print("=" * 80)
-    
-    return {
-        "status": "success",
-        "keyword_id": str(keywordId),
-        "urls_crawled": len(urls),
-        "urls" : urls,
-        "summary": finalValue
-    }
+            "status": "success",
+            "keyword_id": str(keywordId),
+            "urls_crawled": len(urls),
+            "urls" : urls,
+            "summary": finalValue
+        }
+    else : 
+         return {
+            "status": "success",
+            "keyword_id": str(keywordId),
+            # "urls_crawled": len(urls),
+            # "urls" : urls,
+            # "summary": finalValue
+        }

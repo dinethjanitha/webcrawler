@@ -8,7 +8,6 @@ from schema.summarySchema import SummaryOut
 
 class FullSchema(BaseModel):
     keyword: str
-    siteDomain: str
     urls: Optional[list[str]] = []  # Optional with default empty list
     content: Optional[list[str]] = []  # Optional with default empty list
     summary: str

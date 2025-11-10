@@ -7,7 +7,6 @@ from config.objectIdConterver import PyObjectId
 
 class Keyword(BaseModel):
     keyword: str
-    siteDomain: str
     urls: Optional[list[str]] = []  # Optional with default empty list
 
 class KeywordOut(Keyword):
