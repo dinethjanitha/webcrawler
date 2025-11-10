@@ -8,6 +8,19 @@ import os
 import datetime
 from urllib.parse import urlparse, urljoin, urlunparse
 
+"""
+WebCrawSpider - Simple Web Crawler with Social Media Link Extraction
+
+Single URL Mode:
+- Starts from the exact URL you provide
+- Follows internal links found on that page (up to 100 pages)
+- Extracts social media links but does NOT crawl them
+
+Multiple URL Mode:
+- Crawls only the URLs you provide
+- Does NOT follow any links
+"""
+
 load_dotenv("./.env")
 
 CONNECTION_STRING = os.getenv("CONNECTION_STRING")
@@ -18,15 +31,15 @@ class WebCrawSpider(scrapy.Spider):
     
     # Custom settings
     custom_settings = {
-        'ROBOTSTXT_OBEY': False,  # Bypass robots.txt blocking
-        'CONCURRENT_REQUESTS': 1,  # Process URLs one at a time
-        'DOWNLOAD_DELAY': 1,  # 1 second between requests
-        'DOWNLOAD_TIMEOUT': 30,  # 30 second timeout per URL
+        'ROBOTSTXT_OBEY': False,
+        'CONCURRENT_REQUESTS': 1,
+        'DOWNLOAD_DELAY': 1,
+        'DOWNLOAD_TIMEOUT': 30,
         'RETRY_ENABLED': True,
         'RETRY_TIMES': 2,
         'LOG_LEVEL': 'INFO',
         'CLOSESPIDER_TIMEOUT': 0,
-        'CLOSESPIDER_PAGECOUNT': 5,  # Stop after 100 pages
+        'CLOSESPIDER_PAGECOUNT': 5,  # Disabled, manual limit
     }
 
     def __init__(self, start_urls=None, keywordId=None, *args, **kwargs):
@@ -43,91 +56,29 @@ class WebCrawSpider(scrapy.Spider):
             if not start_urls[i].startswith("https://") and not start_urls[i].startswith("http://"):
                 start_urls[i] = "https://" + start_urls[i]
 
+        self.start_urls = start_urls
         self.keywordId = keywordId
         self.client = pymongo.MongoClient(CONNECTION_STRING)
         self.db = self.client['webcrawl']
         self.collection = self.db['sitesData']
-        self.collection2 = self.db['keyword']
         
-        # Get previously crawled URLs using aggregate
-        aggregate = [
-            {
-                '$match': {
-                    '_id': ObjectId(keywordId)
-                }
-            }, {
-                '$lookup': {
-                    'from': 'sitesData', 
-                    'localField': '_id', 
-                    'foreignField': 'keywordId', 
-                    'as': 'sitesInfo'
-                }
-            }, {
-                '$project': {
-                    '_id': 1, 
-                    'keyword': 1, 
-                    'urls': '$sitesInfo.siteUrl'
-                }
-            }
-        ]
-
-        self.previous_crawled_urls = set()
-        
-        try:
-            result = list(self.collection2.aggregate(aggregate))
-
-            if result and len(result) > 0:
-                previous_crawled_urls_list = result[0].get("urls", [])
-                self.previous_crawled_urls = set(previous_crawled_urls_list)
-                print(f"Loaded {len(self.previous_crawled_urls)} previously crawled URLs")
-            else:
-                print("No previous crawled URLs found (new keyword)")
-                
-        except Exception as e:
-            print(f"Error loading previous URLs: {e}")
-            import traceback
-            traceback.print_exc()
-            self.previous_crawled_urls = set()
-        
-        # remember original provided urls (before filtering)
-        original_count = len(start_urls)
-        original_start_urls = start_urls.copy()
-
-        # Filter out already crawled URLs from start_urls
-        self.start_urls = [url for url in start_urls if url not in self.previous_crawled_urls]
-        skipped_count = original_count - len(self.start_urls)
-
-        # === FIX: if user provided exactly ONE URL, don't silently drop it just because it exists in DB.
-        # We want single-url mode to run and follow internal links even if that URL was previously crawled.
-        if original_count == 1 and len(self.start_urls) == 0:
-            # restore the original single URL so spider runs in single_url_with_links mode
-            self.start_urls = [original_start_urls[0]]
-            # adjust skipped_count accordingly (we still mark it as previously crawled)
-            skipped_count = 1 if original_start_urls[0] in self.previous_crawled_urls else 0
-        # === end fix
-
         # Track progress and visited URLs
         self.processed_count = 0
         self.success_count = 0
         self.fail_count = 0
-        self.skipped_count = skipped_count
-        self.visited_urls = set(self.previous_crawled_urls)
+        self.visited_urls = set()  # URLs visited in THIS session only
         self.queued_urls = set()
         self.max_pages = 100
         
         # Determine crawl mode
-        if len(self.start_urls) == 0:
-            self.crawl_mode = "none"
-        elif len(self.start_urls) == 1:
+        if len(self.start_urls) == 1:
             self.crawl_mode = "single_url_with_links"
         else:
             self.crawl_mode = "multiple_urls"
         
         # Extract allowed domains (include www and non-www versions)
-        # NOTE: use original_start_urls so domain checks align with the provided URL(s),
-        # even if we restored a single URL above.
         self.allowed_domains = set()
-        for url in original_start_urls:
+        for url in self.start_urls:
             parsed = urlparse(url)
             domain = parsed.netloc
             if domain:
@@ -147,27 +98,15 @@ class WebCrawSpider(scrapy.Spider):
         elif self.crawl_mode == "single_url_with_links":
             print(f"   Single URL: Follow internal links (max {self.max_pages} pages)")
         else:
-            print(f"   No URLs to crawl (all already processed)")
+            print(f"   Multiple URLs: Parse only provided URLs")
         
         print(f"Allowed domains: {', '.join(sorted(self.allowed_domains))}")
-        print(f"Total URLs provided: {original_count}")
-        print(f"Already crawled (skipped): {skipped_count}")
-        print(f"New URLs to crawl: {len(self.start_urls)}")
-        
-        if len(self.start_urls) > 1 : 
-            if skipped_count > 0:
-                print(f"\nSkipped URLs (already crawled):")
-                for url in original_start_urls:
-                    if url in self.previous_crawled_urls:
-                        print(f"   {url}")
-            
-            if len(self.start_urls) > 0:
-                print(f"\nNew URLs to crawl:")
-                for i, url in enumerate(self.start_urls, 1):
-                    print(f"   [{i}] {url}")
-            else:
-                print("\nNo new URLs to crawl - all URLs have been previously processed!")            
-            
+        print(f"Maximum pages to crawl: {self.max_pages if self.crawl_mode == 'single_url_with_links' else len(self.start_urls)}")
+        print(f"Initial URLs to crawl: {len(self.start_urls)}")
+        for i, url in enumerate(self.start_urls, 1):
+            print(f"   [{i}] {url}")
+        print(f"\nNote: Will check database for each URL before saving")
+        print(f"      Already crawled URLs will be skipped but links extracted")
         print("=" * 80)
 
     def normalize_url(self, url):
@@ -191,24 +130,14 @@ class WebCrawSpider(scrapy.Spider):
         
         normalized_url = self.normalize_url(response.url)
         
-        # Skip if already visited
-        # if normalized_url in self.visited_urls:
-        #     print(f"[SKIP] Already visited: {normalized_url}")
-        #     return
-        # === FIX: allow single-url-with-links mode to crawl even if URL was previously crawled.
-        # if normalized_url in self.previous_crawled_urls and self.crawl_mode != "single_url_with_links":
-        #     print(f"[SKIP] Already visited (previously crawled): {normalized_url}")
-        #     return
-        # === end fix
-        
         # Check if max pages reached
         if self.crawl_mode == "single_url_with_links" and self.processed_count >= self.max_pages:
             print(f"\n[STOP] Max pages limit ({self.max_pages}) reached.")
-            print(f"\n[STOP] Max pages limit ({self.max_pages}) reached.")
-            print(f"\n[STOP] Max pages limit ({self.max_pages}) reached.")
-            print(f"\n[STOP] Max pages limit ({self.max_pages}) reached.")
-            print(f"\n[STOP] Max pages limit ({self.max_pages}) reached.")
-            print(f"\n[STOP] Max pages limit ({self.max_pages}) reached.")
+            return
+        
+        # Skip if already visited in this session
+        if normalized_url in self.visited_urls:
+            print(f"[SKIP] Already visited in this session: {normalized_url}")
             return
         
         self.visited_urls.add(normalized_url)
@@ -229,6 +158,43 @@ class WebCrawSpider(scrapy.Spider):
             
             image_urls = list(set(image_urls))
 
+            # Extract social media links
+            social_media_domains = {
+                'facebook.com', 'fb.com', 'fb.me', 'www.facebook.com',
+                'twitter.com', 'x.com', 'www.twitter.com', 'www.x.com',
+                'instagram.com', 'www.instagram.com',
+                'linkedin.com', 'www.linkedin.com',
+                'youtube.com', 'youtu.be', 'www.youtube.com',
+                'tiktok.com', 'www.tiktok.com',
+                'pinterest.com', 'www.pinterest.com',
+                'reddit.com', 'www.reddit.com',
+                'snapchat.com', 'www.snapchat.com',
+                'whatsapp.com', 'wa.me',
+                'telegram.org', 't.me'
+            }
+            
+            social_media_links = []
+            
+            for link in soup.find_all('a', href=True):
+                href = link['href'].strip()
+                
+                if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                    continue
+                
+                try:
+                    absolute_url = urljoin(response.url, href)
+                    link_domain = urlparse(absolute_url).netloc.lower()
+                    
+                    # Check if it's a social media link
+                    for sm_domain in social_media_domains:
+                        if sm_domain in link_domain:
+                            social_media_links.append(absolute_url)
+                            break
+                except:
+                    continue
+            
+            social_media_links = list(set(social_media_links))
+
             # Remove unwanted tags
             for tag in soup(["script", "style", "noscript", "header", "footer", "svg", "meta"]):
                 tag.decompose()
@@ -236,30 +202,46 @@ class WebCrawSpider(scrapy.Spider):
             # Extract clean text
             body_text = " ".join(soup.get_text(separator=" ").split())
 
-            # Prepare data
-            data = {
+            # Check if URL already exists in database
+            existing_doc = self.collection.find_one({
                 "keywordId": ObjectId(self.keywordId),
-                "siteUrl": normalized_url,
-                "content": body_text,
-                "imageUrls": image_urls,
-                "createdAt" : datetime.datetime.utcnow()
-            }
-
-            # Save to MongoDB
-            result = self.collection.insert_one(data)
-            self.success_count += 1
+                "siteUrl": response.url
+            })
             
-            print(f"[SUCCESS] Saved to MongoDB")
-            print(f"   Document ID: {result.inserted_id}")
-            print(f"   Content: {len(body_text)} chars")
-            print(f"   Images: {len(image_urls)}")
+            if existing_doc:
+                print(f"[SKIP] Already in database - not saving again")
+                print(f"   Existing Document ID: {existing_doc['_id']}")
+                print(f"   Will continue to extract links from this page")
+            else:
+                # Prepare data
+                data = {
+                    "keywordId": ObjectId(self.keywordId),
+                    "siteUrl": response.url,
+                    "content": body_text,
+                    "imageUrls": image_urls,
+                    # "socialMediaLinks": social_media_links,
+                    "createdAt" : datetime.datetime.utcnow()
+                }
+
+                # Save to MongoDB
+                result = self.collection.insert_one(data)
+                self.success_count += 1
+                
+                print(f"[SUCCESS] Saved to MongoDB")
+                print(f"   Document ID: {result.inserted_id}")
+                print(f"   URL Saved: {response.url}")
+                print(f"   Content: {len(body_text)} chars")
+                print(f"   Images: {len(image_urls)}")
+                print(f"   Social Media Links: {len(social_media_links)}")
+                if social_media_links:
+                    print(f"   Social Media Found:")
+                    for sm_link in social_media_links[:3]:
+                        print(f"      - {sm_link}")
+                    if len(social_media_links) > 3:
+                        print(f"      ... and {len(social_media_links) - 3} more")
             
             # Follow links ONLY if single URL mode
-
-            print("Before start here")
-
-            if len(self.start_urls) == 1 :
-                print("Start here")
+            if self.crawl_mode == "single_url_with_links":
                 if self.processed_count < self.max_pages:
                     links_found = 0
                     links_queued = 0
@@ -269,11 +251,24 @@ class WebCrawSpider(scrapy.Spider):
                     
                     print(f"\n   [EXTRACTING LINKS]")
                     
+                    # Social media domains to skip (don't crawl these)
+                    social_media_domains = {
+                        'facebook.com', 'fb.com', 'fb.me', 'www.facebook.com',
+                        'twitter.com', 'x.com', 'www.twitter.com', 'www.x.com',
+                        'instagram.com', 'www.instagram.com',
+                        'linkedin.com', 'www.linkedin.com',
+                        'youtube.com', 'youtu.be', 'www.youtube.com',
+                        'tiktok.com', 'www.tiktok.com',
+                        'pinterest.com', 'www.pinterest.com',
+                        'reddit.com', 'www.reddit.com',
+                        'snapchat.com', 'www.snapchat.com',
+                        'whatsapp.com', 'wa.me',
+                        'telegram.org', 't.me'
+                    }
+                    
                     for link in soup.find_all('a', href=True):
                         href = link['href'].strip()
                         
-                        print("Href")
-                        print(href)
                         # Skip invalid links
                         if (not href or 
                             href.startswith('#') or 
@@ -290,7 +285,13 @@ class WebCrawSpider(scrapy.Spider):
                             links_skipped_invalid += 1
                             continue
                         
-                        link_domain = urlparse(absolute_url).netloc
+                        link_domain = urlparse(absolute_url).netloc.lower()
+                        
+                        # Skip social media links (already collected separately)
+                        is_social_media = any(sm_domain in link_domain for sm_domain in social_media_domains)
+                        if is_social_media:
+                            links_skipped_external += 1
+                            continue
                         
                         links_found += 1
                         
@@ -352,10 +353,10 @@ class WebCrawSpider(scrapy.Spider):
         if self.crawl_mode == "single_url_with_links":
             print(f"   Max pages limit: {self.max_pages}")
         print(f"   Total Processed: {self.processed_count}")
-        print(f"   Success: {self.success_count}")
+        print(f"   New Documents Saved: {self.success_count}")
+        print(f"   Already in DB (skipped): {self.processed_count - self.success_count - self.fail_count}")
         print(f"   Failed: {self.fail_count}")
         print(f"   Unique URLs visited: {len(self.visited_urls)}")
-        print(f"   URLs queued: {len(self.queued_urls)}")
         print("=" * 80)
         
         if hasattr(self, 'client'):
