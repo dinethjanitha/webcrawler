@@ -311,7 +311,7 @@ async def getCrawlContent(keywordId:str) -> str:
     now = datetime.utcnow()
     ten_minutes_ago = now - timedelta(minutes=10)
     
-    siteDataResults = await siteDataCollection.find({'keywordId' : ObjectId(keywordId) , 'createdAt': {'$gte': ten_minutes_ago}  }).to_list(length=None)
+    siteDataResults = await siteDataCollection.find({'keywordId' : ObjectId(keywordId) }).to_list(length=None)
     
     content = []
     for document in siteDataResults:
@@ -431,10 +431,29 @@ def saveKGToNeo4j(keywordId: str, kg_json: dict):
 
 async def MyAgent():
     SYSTEM_PROMPT = """
-    You are an intelligent agent that can gather crawl data by keyword and create knowledge graphs automatically.
-    You have access to two tools:
-    - getCrawlContent: fetches all crawl text for a given keyword ID.
-    - createKG: converts raw text into a structured knowledge graph.
+    You are an intelligent agent that creates knowledge graphs from crawled web content.
+    
+    YOUR WORKFLOW (MUST FOLLOW IN ORDER):
+    1. First, call getCrawlContent(keywordId) to fetch the crawled text data
+    2. Then, call createKG(content, keywordId) to create the knowledge graph from that content
+    3. The createKG tool will automatically save the KG to Neo4j
+    4. For all keyword create KG
+    
+    IMPORTANT RULES:
+    - Always use BOTH tools in sequence
+    - Pass the keywordId as a STRING (not ObjectId)
+    - Pass the full content text to createKG
+    - Report when each step is completed
+    
+    AVAILABLE TOOLS:
+    - getCrawlContent(keywordId: str) -> Returns all crawled text for the keyword
+    - createKG(content: str, keywordId: str) -> Creates KG and saves to Neo4j
+    
+    Example flow for keywordId "507f1f77bcf86cd799439011":
+    1. Call: getCrawlContent("507f1f77bcf86cd799439011")
+    2. Receive: "SLT Mobitel offers fiber internet..."
+    3. Call: createKG("SLT Mobitel offers fiber internet...", "507f1f77bcf86cd799439011")
+    4. Report: "Knowledge graph created and saved to Neo4j"
     """
 
     checkpointer = InMemorySaver()
@@ -444,9 +463,8 @@ async def MyAgent():
         model=llm,
         system_prompt=SYSTEM_PROMPT,
         tools=tools,
-        # checkpointer=checkpointer
+        checkpointer=checkpointer
     )
-
 
     return agent
 
@@ -473,7 +491,7 @@ async def FullAutoAgent(keywordId: str):
 
 
     # Step 4: Save to Neo4j
-    print("Knowledge Graph saved to Neo4j successfully.")
+    # print("Knowledge Graph saved to Neo4j successfully.")
 
     return response
 
@@ -536,40 +554,39 @@ async def getKeywordByDomain(url):
 
 
 # Add urls to keyword document
-async def storeRelevantUrls(keywordId , urls_list):
+# async def storeRelevantUrls(keywordId):
     
-    try:
-        keywordDetails = await getKeywordById(keywordId)
+#     try:
+#         keywordDetails = await getKeywordById(keywordId)
         
-        keyword = keywordDetails["keyword"]
-        # siteDomain = keywordDetails["siteDomain"]
+#         keyword = keywordDetails["keyword"]
 
-        # results = googlesearch(keyword , siteDomain)
+#         results = googlesearch(keyword)
 
-        # urlList = []
+#         urlList = []
 
-        # for item in results.get("items", []):
-        #     print(f"Title: {item['title']}")
-        #     urlList.append(item['link'])
-        #     print(f"Link: {item['link']}\n")
+#         for item in results.get("items", []):
+#             print(f"Title: {item['title']}")
+#             urlList.append(item['link'])
+#             print(f"Link: {item['link']}\n")
 
-        print(urls_list)
+#         # print(urls_list)
 
-        updatedValues = await keyword_collection.update_one(
-            {"_id": ObjectId(keywordId)},
-            {"$push": {"urls": {"$each": urls_list}}}
-        )
-        print("Updated Values")
-        print(updatedValues)
+#         updatedValues = await keyword_collection.update_one(
+#             {"_id": ObjectId(keywordId)},
+#             {"$push": {"urls": {"$each": urlList}}}
+#         )
+#         print("Updated Values")
+#         print(updatedValues)
 
-        if updatedValues.acknowledged:
-            print("Update successful!")
-            result = keywordId
-            return result    
-        return None
-    except Exception as e:
-        print(e)
-        return None
+#         if updatedValues.acknowledged:
+#             print("Update successful!")
+#             result = keywordId
+#             return result    
+#         return None
+#     except Exception as e:
+#         print(e)
+#         return None
 
 
 # Crawl web data using subprocess
@@ -716,11 +733,16 @@ async def exec(keyword , url_list):
     resultMongo = await getKeywordById(storedKeywordId)
     keywordId = resultMongo["_id"]
     # Step 3: Fetch Google URLs
-    # print("\n" + "=" * 80)
-    # print("STEP 3: Fetching Google search URLs")
-    # print("=" * 80)
-    # updatedKey = await storeRelevantUrls(storedKeyword.inserted_id)
+
     
+    # if not url_list or len(url_list) == 0:
+        # print("\n" + "=" * 80)
+        # print("STEP 3: Fetching Social media data from google search URLs")
+        # print("=" * 80)
+    #     print("Finding in here!")
+    #     await storeRelevantUrls(keywordId)
+    
+
     # if not keywordId:
     #     print("ERROR: Failed to store URLs")
     #     return {"error": "Failed to fetch URLs from Google"}
@@ -736,8 +758,14 @@ async def exec(keyword , url_list):
     #     return {"error": "No URLs found in Google search results"}
     
     url = updatedDetails["keyword"]
-    # url_list = updatedDetails["urls"]
+    # url_list_search = updatedDetails["urls"]
+
+
     urls = [url]
+    
+    # if url_list_search and len(url_list_search) > 0:
+    #     urls += url_list_search
+    
     if url_list and len(url_list) > 0:
         print("\n" + "=" * 80)
         print("STEP 3.1: Manual added url fined crawling started with it!")
@@ -771,7 +799,7 @@ async def exec(keyword , url_list):
     resultAgent = await FullAutoAgent(keywordId)
 
     print("------------------------\n Result Agent\n------------------------")
-    print(resultAgent)
+    # print(resultAgent)
     # Step 5: Summarize (only if crawl succeeded)
     print("\n" + "=" * 80)
     print("STEP 6: Generating AI summary")
