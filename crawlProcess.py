@@ -44,6 +44,312 @@ AUTH = (os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
 llm = init_chat_model("gemini-2.5-flash", model_provider="google_genai")
 
 
+# Configuration for text chunking
+MAX_CHUNK_SIZE = 5000  # Characters per chunk (adjust based on LLM token limit)
+CHUNK_OVERLAP = 500     # Overlap between chunks to maintain context
+
+
+# Error tracking for model/agent errors
+error_log = []
+
+def trackError(component: str, error_type: str, error_message: str, keywordId: str = None, details: dict = None):
+    """
+    Track errors that occur during model/agent execution
+    
+    Args:
+        component: Where the error occurred (e.g., 'createKG', 'FullAutoAgent', 'LLM')
+        error_type: Type of error (e.g., 'JSONParseError', 'ValidationError', 'TimeoutError')
+        error_message: The error message
+        keywordId: Associated keyword ID if applicable
+        details: Additional details about the error
+    """
+    error_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "component": component,
+        "error_type": error_type,
+        "error_message": str(error_message),
+        "keywordId": keywordId,
+        "details": details or {}
+    }
+    
+    error_log.append(error_entry)
+    
+    # Print formatted error
+    print("\n" + "🔴" * 40)
+    print(f"❌ ERROR TRACKED:")
+    print(f"   Component: {component}")
+    print(f"   Type: {error_type}")
+    print(f"   Message: {error_message}")
+    if keywordId:
+        print(f"   Keyword ID: {keywordId}")
+    if details:
+        print(f"   Details: {json.dumps(details, indent=2)}")
+    print("🔴" * 40 + "\n")
+    
+    return error_entry
+
+
+def getErrorLog(component: str = None, keywordId: str = None):
+    """
+    Retrieve error logs with optional filtering
+    
+    Args:
+        component: Filter by component name
+        keywordId: Filter by keyword ID
+    
+    Returns:
+        List of error entries
+    """
+    filtered_errors = error_log
+    
+    if component:
+        filtered_errors = [e for e in filtered_errors if e["component"] == component]
+    
+    if keywordId:
+        filtered_errors = [e for e in filtered_errors if e["keywordId"] == keywordId]
+    
+    return filtered_errors
+
+
+def getErrorSummary():
+    """
+    Get a summary of all tracked errors
+    
+    Returns:
+        Dictionary with error statistics and recent errors
+    """
+    if not error_log:
+        return {
+            "total_errors": 0,
+            "message": "No errors tracked"
+        }
+    
+    # Count by component
+    component_counts = {}
+    error_type_counts = {}
+    
+    for error in error_log:
+        comp = error["component"]
+        err_type = error["error_type"]
+        
+        component_counts[comp] = component_counts.get(comp, 0) + 1
+        error_type_counts[err_type] = error_type_counts.get(err_type, 0) + 1
+    
+    return {
+        "total_errors": len(error_log),
+        "errors_by_component": component_counts,
+        "errors_by_type": error_type_counts,
+        "recent_errors": error_log[-5:],  # Last 5 errors
+        "all_errors": error_log
+    }
+
+
+def chunkText(text: str, chunk_size: int = MAX_CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list:
+    """
+    Split large text into smaller chunks with overlap
+    
+    Args:
+        text: The text to chunk
+        chunk_size: Maximum characters per chunk
+        overlap: Number of characters to overlap between chunks
+    
+    Returns:
+        List of text chunks
+    """
+    if not text or len(text) <= chunk_size:
+        return [text] if text else []
+    
+    chunks = []
+    start = 0
+    text_length = len(text)
+    
+    print(f"   📝 Chunking {text_length} chars into chunks of {chunk_size} with {overlap} overlap")
+    
+    while start < text_length:
+        end = min(start + chunk_size, text_length)
+        
+        # If not the last chunk, try to break at a sentence or word boundary
+        if end < text_length:
+            # Look for sentence end (., !, ?)
+            last_period = text.rfind('.', start, end)
+            last_exclaim = text.rfind('!', start, end)
+            last_question = text.rfind('?', start, end)
+            
+            sentence_end = max(last_period, last_exclaim, last_question)
+            
+            if sentence_end > start + (chunk_size // 2):  # If found in latter half
+                end = sentence_end + 1
+            else:
+                # Fall back to word boundary
+                last_space = text.rfind(' ', start, end)
+                if last_space > start:
+                    end = last_space
+        
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+            print(f"      Chunk {len(chunks)}: chars {start}-{end} ({len(chunk)} chars)")
+        
+        # Move start position with overlap
+        if end >= text_length:
+            break
+        start = end - overlap
+    
+    print(f"   ✅ Created {len(chunks)} chunks")
+    return chunks
+
+
+def mergeKGJsons(kg_list: list) -> dict:
+    """
+    Merge multiple KG JSONs into one, removing duplicates
+    
+    Args:
+        kg_list: List of KG JSON dictionaries
+    
+    Returns:
+        Merged KG JSON with unique nodes and edges
+    """
+    merged_nodes = []
+    merged_edges = []
+    
+    seen_nodes = set()  # Track unique nodes by (label, name)
+    seen_edges = set()  # Track unique edges by (from, type, to)
+    
+    for kg in kg_list:
+        # Merge nodes
+        for node in kg.get("nodes", []):
+            node_key = (node.get("label", ""), node.get("name", ""))
+            if node_key not in seen_nodes:
+                seen_nodes.add(node_key)
+                merged_nodes.append(node)
+        
+        # Merge edges
+        for edge in kg.get("edges", []):
+            edge_key = (edge.get("from", ""), edge.get("type", ""), edge.get("to", ""))
+            if edge_key not in seen_edges:
+                seen_edges.add(edge_key)
+                merged_edges.append(edge)
+    
+    return {
+        "nodes": merged_nodes,
+        "edges": merged_edges
+    }
+
+
+def processChunkToKG(chunk_content: str, keywordId: str, chunk_num: int, total_chunks: int) -> dict:
+    """
+    Process a single chunk of content to create a partial KG
+    
+    Args:
+        chunk_content: Text content to process
+        keywordId: Keyword ID for error tracking
+        chunk_num: Current chunk number
+        total_chunks: Total number of chunks
+    
+    Returns:
+        KG JSON dictionary with nodes and edges
+    """
+    prompt_template = """
+    You are an expert in extracting structured knowledge from text.
+    Double check it and make it correctly
+
+    Input: {crawl_text}
+
+    Task:
+    - Identify all nodes (entities) and relationships (edges) mentioned in the text.
+    - Output ONLY valid JSON in this format:
+    - All letters should be simple letters 
+
+    {{
+    "nodes": [  
+        {{
+        "label": "<NodeLabel>",
+        "name": "<NodeName>",
+        "properties": {{"key": "value"}}
+        }}
+    ],
+    "edges": [
+        {{
+        "from": "<SourceNodeName>",
+        "type": "<RelationType>",
+        "to": "<TargetNodeName>",
+        "properties": {{"key": "value"}}
+        }}
+    ]
+    }}
+    """
+
+    prompt = PromptTemplate(
+        input_variables=["crawl_text"],
+        template=prompt_template,
+    )
+
+    full_prompt = prompt.format_prompt(crawl_text=chunk_content)
+    
+    print(f"      📤 Sending chunk {chunk_num}/{total_chunks} to LLM ({len(chunk_content)} chars)")
+    print(f"         Preview: {chunk_content[:150]}...")
+
+    try:
+        llm_response = llm.invoke(full_prompt)
+        print(f"      📥 Received LLM response ({len(llm_response.content)} chars)")
+        clean_text = re.sub(r"^```json\s*|\s*```$", "", llm_response.content.strip())
+        json_out = json.loads(clean_text)
+        
+        # Validate the JSON structure
+        if "nodes" not in json_out or "edges" not in json_out:
+            error_msg = "LLM response missing 'nodes' or 'edges' keys"
+            trackError(
+                component="processChunkToKG",
+                error_type="InvalidJSONStructure",
+                error_message=error_msg,
+                keywordId=keywordId,
+                details={
+                    "chunk_num": chunk_num,
+                    "total_chunks": total_chunks,
+                    "llm_response": llm_response.content[:500],
+                    "parsed_json": json_out
+                }
+            )
+            raise ValueError(error_msg)
+        
+        return json_out
+        
+    except json.JSONDecodeError as e:
+        error_details = {
+            "chunk_num": chunk_num,
+            "total_chunks": total_chunks,
+            "llm_response": llm_response.content if 'llm_response' in locals() else "No response",
+            "cleaned_text": clean_text if 'clean_text' in locals() else "No cleaned text",
+            "parse_error": str(e),
+            "content_preview": chunk_content[:200] if chunk_content else "No content",
+            "content_length": len(chunk_content) if chunk_content else 0
+        }
+        
+        trackError(
+            component="processChunkToKG",
+            error_type="JSONParseError",
+            error_message=f"Failed to parse LLM response as JSON: {str(e)}",
+            keywordId=keywordId,
+            details=error_details
+        )
+        
+        raise
+    
+    except Exception as e:
+        trackError(
+            component="processChunkToKG",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            keywordId=keywordId,
+            details={
+                "chunk_num": chunk_num,
+                "total_chunks": total_chunks,
+                "content_length": len(chunk_content) if chunk_content else 0
+            }
+        )
+        raise
+
+
 # Agent to access neo4j
 @tool
 def queryNeo4J(cypher_query:str) -> dict:
@@ -309,123 +615,300 @@ async def getCrawlContent(keywordId:str) -> str:
     print("=" * 80)
 
     now = datetime.utcnow()
-    ten_minutes_ago = now - timedelta(minutes=10)
+    ten_minutes_ago = now - timedelta(minutes=6)
     
-    siteDataResults = await siteDataCollection.find({'keywordId' : ObjectId(keywordId) }).to_list(length=None)
-    
+    siteDataResults = await siteDataCollection.find({
+        'keywordId': ObjectId(keywordId),
+        'createdAt': {'$gte': ten_minutes_ago, '$lte': now}
+    }).to_list(None)
+
+
     content = []
     for document in siteDataResults:
-        content.append(document['content'])
-    print("content")
-    print(len(content))
-    if len(content) > 0 :
+        if 'content' in document and document['content']:
+            content.append(str(document['content']))
+    
+    print(f"📊 Found {len(content)} documents in database")
+    
+    if len(content) > 0:
+        # Join all content from all documents
         joinAllContent = "".join(content)
-        print(f"Total content length: {len(joinAllContent)} characters")
-        return joinAllContent
-    else :
+        content_length = len(joinAllContent)
+        print(f"📝 Total content length: {content_length} characters")
+        print(f"   Preview (first 200 chars): {joinAllContent[:200]}...")
+        
+        # Check if content needs chunking - if so, process it here
+        if content_length > MAX_CHUNK_SIZE:
+            print(f"⚠️  Content exceeds {MAX_CHUNK_SIZE} chars - chunking and processing here")
+            
+            # Create chunks
+            chunks = chunkText(joinAllContent, MAX_CHUNK_SIZE, CHUNK_OVERLAP)
+            
+            # Process each chunk and collect partial KGs
+            all_partial_kgs = []
+            
+            for i, chunk in enumerate(chunks):
+                print(f"\n   📦 Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)...")
+                
+                try:
+                    partial_kg = processChunkToKG(chunk, keywordId, i+1, len(chunks))
+                    if partial_kg and (partial_kg.get("nodes") or partial_kg.get("edges")):
+                        all_partial_kgs.append(partial_kg)
+                        print(f"   ✅ Chunk {i+1}: {len(partial_kg.get('nodes', []))} nodes, {len(partial_kg.get('edges', []))} edges")
+                    else:
+                        print(f"   ⚠️  Chunk {i+1}: No KG data extracted")
+                        
+                except Exception as e:
+                    error_msg = f"Failed to process chunk {i+1}/{len(chunks)}: {str(e)}"
+                    print(f"   ❌ {error_msg}")
+                    trackError(
+                        component="getCrawlContent",
+                        error_type="ChunkProcessingError",
+                        error_message=error_msg,
+                        keywordId=keywordId,
+                        details={
+                            "chunk_number": i+1,
+                            "total_chunks": len(chunks),
+                            "chunk_length": len(chunk),
+                            "error": str(e)
+                        }
+                    )
+                    # Continue with other chunks even if one fails
+                    continue
+            
+            # Merge all partial KGs and return as JSON string
+            if all_partial_kgs:
+                print(f"\n   🔗 Merging {len(all_partial_kgs)} partial knowledge graphs...")
+                merged_kg = mergeKGJsons(all_partial_kgs)
+                print(f"   ✅ Final merged KG: {len(merged_kg.get('nodes', []))} nodes, {len(merged_kg.get('edges', []))} edges")
+                
+                # Save to Neo4j immediately after merging
+                print(f"\n   💾 Saving merged KG to Neo4j...")
+                try:
+                    saveKGToNeo4j(keywordId, merged_kg)
+                    print(f"   ✅ Successfully saved to Neo4j!")
+                except Exception as e:
+                    print(f"   ❌ Failed to save to Neo4j: {str(e)}")
+                    trackError(
+                        component="getCrawlContent->saveKGToNeo4j",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        keywordId=keywordId,
+                        details={
+                            "nodes_count": len(merged_kg.get("nodes", [])),
+                            "edges_count": len(merged_kg.get("edges", []))
+                        }
+                    )
+                
+                # Return JSON string representation that createKG can handle
+                return json.dumps({
+                    "already_processed": True,
+                    "kg_data": merged_kg
+                })
+            else:
+                print(f"   ❌ All chunks failed to produce valid KG data")
+                return json.dumps({
+                    "already_processed": True,
+                    "kg_data": {"nodes": [], "edges": [], "error": "All chunks failed"}
+                })
+        else:
+            print(f"✅ Content size OK ({content_length} chars) - returning for normal processing")
+            return joinAllContent
+    else:
+        print("❌ No content found in database")
         return ""
     
 
 @tool
 def createKG(content:str , keywordId:str) -> object:
-    """After get crawl content create Knowledge Graph and return Knowledge Graph JSON format """
+    """After get crawl content, create Knowledge Graph and return Knowledge Graph JSON format Double check and make it correctly """
 
     print("\n" + "=" * 80)
-    print("STEP 5.*: Creating Knowledge Graph...")
+    print("STEP 5.*: Creating Knowledge Graph (AGENT TOOL)")
     print("=" * 80)
-
-    prompt_template = """
-    You are an expert in extracting structured knowledge from text.
-
-    Input: {crawl_text}
-
-    Task:
-    - Identify all nodes (entities) and relationships (edges) mentioned in the text.
-    - Output ONLY valid JSON in this format:
-    - All letters should be simple letters 
-
-    {{
-    "nodes": [  
-        {{
-        "label": "<NodeLabel>",
-        "name": "<NodeName>",
-        "properties": {{"key": "value"}}
-        }}
-    ],
-    "edges": [
-        {{
-        "from": "<SourceNodeName>",
-        "type": "<RelationType>",
-        "to": "<TargetNodeName>",
-        "properties": {{"key": "value"}}
-        }}
-    ]
-    }}
-    """
-
-
-    prompt = PromptTemplate(
-        input_variables=["crawl_text"],
-        template=prompt_template,
-    )
-
-    full_prompt = prompt.format_prompt(
-        crawl_text=content
-    )
-
+    print(f"🤖 Agent called createKG tool for keywordId: {keywordId}")
+    
+    # Check if content was already processed in chunks by getCrawlContent
     try:
-        print("Generating JSON schema for create knowledge graph... ")
-        llm_response = llm.invoke(full_prompt)
+        parsed_content = json.loads(content)
+        if isinstance(parsed_content, dict) and parsed_content.get("already_processed"):
+            print("✅ Content was already chunked, processed, and saved by getCrawlContent")
+            json_out = parsed_content.get("kg_data", {"nodes": [], "edges": []})
+            
+            if json_out.get("nodes") or json_out.get("edges"):
+                print(f"✅ KG already saved in Neo4j: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
+                return json_out
+            else:
+                print("⚠️  Pre-processed KG is empty")
+                return json_out
+    except (json.JSONDecodeError, TypeError):
+        # Not pre-processed JSON, continue with normal flow
+        pass
     
-        clean_text = re.sub(r"^```json\s*|\s*```$", "", llm_response.content.strip())
-
-        json_out = json.loads(clean_text)
+    # Validate content before processing
+    if not content or len(content.strip()) < 10:
+        error_msg = f"❌ Content is empty or too short (length: {len(content) if content else 0})"
+        print(error_msg)
+        trackError(
+            component="createKG",
+            error_type="EmptyContentError",
+            error_message=error_msg,
+            keywordId=keywordId,
+            details={"content_length": len(content) if content else 0}
+        )
+        # Return empty KG structure instead of crashing
+        return {
+            "nodes": [],
+            "edges": [],
+            "error": "No content available to create knowledge graph"
+        }
+    
+    content_length = len(content)
+    print(f"✅ Processing content: {content_length} characters")
+    print(f"   First 200 chars: {content[:200]}...")
+    
+    # Process directly (content is small enough)
+    print(f"   Content size OK - processing without chunking")
+    try:
+        json_out = processChunkToKG(content, keywordId, 1, 1)
+        print(f"✅ KG JSON validated: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
     except Exception as e:
-        print(e)
-        raise HTTPException(status_code=500, detail="Internal server error!")
-    
-    print(llm_response.content)
+        error_msg = f"Failed to process content: {str(e)}"
+        print(f"❌ {error_msg}")
+        trackError(
+            component="createKG",
+            error_type=type(e).__name__,
+            error_message=error_msg,
+            keywordId=keywordId,
+            details={
+                "content_length": content_length,
+                "error": str(e)
+            }
+        )
+        return {
+            "nodes": [],
+            "edges": [],
+            "error": error_msg
+        }
 
-    saveKGToNeo4j(keywordId , json_out)
+    # Save to Neo4j
+    try:
+        print(f"🔄 Calling saveKGToNeo4j with keywordId={keywordId}")
+        print(f"   KG contains: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
+        saveKGToNeo4j(keywordId, json_out)
+        print(f"✅ saveKGToNeo4j completed without exceptions")
+    except Exception as e:
+        print(f"❌ Exception caught from saveKGToNeo4j: {type(e).__name__}: {str(e)}")
+        trackError(
+            component="createKG->saveKGToNeo4j",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            keywordId=keywordId,
+            details={
+                "nodes_count": len(json_out.get("nodes", [])),
+                "edges_count": len(json_out.get("edges", []))
+            }
+        )
+        raise
+    
     return json_out
 
 
 def saveKGToNeo4j(keywordId: str, kg_json: dict):
     print("\n" + "=" * 80)
-    print("STEP 5.*: Saving KG in Neo4j...")
+    print("STEP 5.*: Saving KG in Neo4j (MERGE mode - adding to existing)...")
     print("=" * 80)
+    
+    # Validate KG data before saving
+    if not kg_json or not isinstance(kg_json, dict):
+        print("❌ Invalid KG JSON structure")
+        return
+    
+    nodes = kg_json.get("nodes", [])
+    edges = kg_json.get("edges", [])
+    
+    print(f"📊 Preparing to merge:")
+    print(f"   - {len(nodes)} nodes")
+    print(f"   - {len(edges)} edges")
+    print(f"   - KeywordId: {keywordId}")
+    
+    if not nodes and not edges:
+        print("⚠️  No nodes or edges to save")
+        return
 
     with GraphDatabase.driver(URI, auth=AUTH) as driver:
         with driver.session() as session:
             try:
-                # Delete old graph for this keyword
-                session.run("MATCH (n {keywordId: $id}) DETACH DELETE n", {"id": keywordId})
-
-                # Create all nodes
-                for node in kg_json["nodes"]:
-                    label = node["label"]
-                    name = node["name"]
+                # MERGE nodes instead of CREATE (adds new or updates existing)
+                nodes_created = 0
+                nodes_updated = 0
+                
+                for i, node in enumerate(nodes):
+                    label = node.get("label", "Unknown")
+                    name = node.get("name", f"Node_{i}")
                     properties = node.get("properties", {})
                     properties.update({"name": name, "keywordId": keywordId})
-                    prop_str = ", ".join([f"{k}: ${k}" for k in properties.keys()])
-                    session.run(f"CREATE (n:{label} {{ {prop_str} }})", properties)
+                    
+                    try:
+                        # Use MERGE to create if not exists, or update if exists
+                        prop_str = ", ".join([f"{k}: ${k}" for k in properties.keys()])
+                        query = f"""
+                            MERGE (n:{label} {{name: $name, keywordId: $keywordId}})
+                            ON CREATE SET {', '.join([f'n.{k} = ${k}' for k in properties.keys()])}
+                            ON MATCH SET {', '.join([f'n.{k} = ${k}' for k in properties.keys()])}
+                            RETURN n
+                        """
+                        result = session.run(query, properties)
+                        record = result.single()
+                        
+                        if record:
+                            nodes_created += 1
+                        
+                    except Exception as e:
+                        print(f"   ⚠️  Failed to merge node {i+1}: {name} - {str(e)}")
+                        continue
+                
+                print(f"✅ Merged {nodes_created}/{len(nodes)} nodes (created or updated)")
 
-                # Create relationships
-                for edge in kg_json["edges"]:
-                    rel_type = re.sub(r"[^A-Za-z0-9_]", "_", edge["type"]).upper()
+                # MERGE relationships instead of CREATE
+                edges_created = 0
+                
+                for i, edge in enumerate(edges):
+                    rel_type = re.sub(r"[^A-Za-z0-9_]", "_", edge.get("type", "RELATED")).upper()
                     props = edge.get("properties", {})
                     props["keywordId"] = keywordId
-                    props["from"] = edge["from"]
-                    props["to"] = edge["to"]
+                    props["from"] = edge.get("from", "")
+                    props["to"] = edge.get("to", "")
+                    
+                    if not props["from"] or not props["to"]:
+                        print(f"   ⚠️  Skipping edge {i+1}: missing from/to nodes")
+                        continue
 
-                    session.run(f"""
-                        MATCH (a {{name: $from, keywordId: $keywordId}}),
-                              (b {{name: $to, keywordId: $keywordId}})
-                        CREATE (a)-[r:{rel_type} {{keywordId: $keywordId}}]->(b)
-                    """, props)
+                    try:
+                        # Use MERGE to avoid duplicate relationships
+                        query = f"""
+                            MATCH (a {{name: $from, keywordId: $keywordId}}),
+                                  (b {{name: $to, keywordId: $keywordId}})
+                            MERGE (a)-[r:{rel_type} {{keywordId: $keywordId}}]->(b)
+                            RETURN r
+                        """
+                        result = session.run(query, props)
+                        record = result.single()
+                        
+                        if record:
+                            edges_created += 1
+                            
+                    except Exception as e:
+                        print(f"   ⚠️  Failed to merge edge {i+1}: {props['from']} -> {props['to']} - {str(e)}")
+                        continue
+                
+                print(f"✅ Merged {edges_created}/{len(edges)} edges (created or updated)")
+                print(f"✅ Successfully merged KG to Neo4j!")
 
             except Exception as e:
-                print(" Neo4j error:", e)
+                print(f"❌ Neo4j error: {e}")
+                import traceback
+                traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"Neo4j error: {e}")
 
 
@@ -435,7 +918,7 @@ async def MyAgent():
     
     YOUR WORKFLOW (MUST FOLLOW IN ORDER):
     1. First, call getCrawlContent(keywordId) to fetch the crawled text data
-    2. Then, call createKG(content, keywordId) to create the knowledge graph from that content
+    2. Then, call createKG(content, keywordId) to create the knowledge graph from that content, make sure this should call always and make query for createKG
     3. The createKG tool will automatically save the KG to Neo4j
     4. For all keyword create KG
     
@@ -469,31 +952,92 @@ async def MyAgent():
     return agent
 
 # Run Agent
-async def FullAutoAgent(keywordId: str):
-
+async def FullAutoAgent(keywordId):
+    """
+    Run agent to create Knowledge Graph with error tracking
+    """
+    keywordId_str = str(keywordId)
+    
     print("\n" + "=" * 80)
-    print("STEP 5.1: Calling Agents")
+    print(f"STEP 5.1: Calling Agents for keywordId: {keywordId_str}")
     print("=" * 80)
-    agent_executor = await MyAgent()
+    
+    try:
+        agent_executor = await MyAgent()
 
-    print("keywordId")
-    print(keywordId)
+        print(f"🤖 Invoking agent with keywordId: {keywordId_str}")
+        print(f"   Agent will: 1) Get crawl content, 2) Create KG (with auto-chunking if needed)")
 
-    # Step 1 + 2 + 3: Crawl content → Create KG
-    response = await agent_executor.ainvoke(
-    {
-        "messages": [
-            {"role": "user", "content": f"Generate a knowledge graph for keyword ID {keywordId}"}
-        ]
-    },
-    config={"configurable": {"thread_id": "kg_1"}}
-    )
+        # Step 1 + 2 + 3: Crawl content → Create KG
+        response = await agent_executor.ainvoke(
+        {
+            "messages": [
+                {"role": "user", "content": f"Generate a knowledge graph for keyword ID {keywordId_str}"}
+            ]
+        },
+        config={"configurable": {"thread_id": f"kg_{keywordId_str}"}}
+        )
 
+        print(response)
+        # Check if response is valid
+        if not response or "messages" not in response:
+            error_msg = "Agent returned invalid response structure"
+            trackError(
+                component="FullAutoAgent",
+                error_type="InvalidAgentResponse",
+                error_message=error_msg,
+                keywordId=keywordId_str,
+                details={
+                    "response_type": type(response).__name__,
+                    "response_keys": list(response.keys()) if isinstance(response, dict) else "Not a dict"
+                }
+            )
+            return {
+                "status": "failed",
+                "reason": error_msg,
+                "keywordId": keywordId_str
+            }
+        
+        # Log successful execution
+        messages = response.get("messages", [])
+        print(f"\n✅ Agent completed successfully with {len(messages)} messages")
+        
+        return response
 
-    # Step 4: Save to Neo4j
-    # print("Knowledge Graph saved to Neo4j successfully.")
-
-    return response
+    except TimeoutError as e:
+        trackError(
+            component="FullAutoAgent",
+            error_type="TimeoutError",
+            error_message=f"Agent execution timed out: {str(e)}",
+            keywordId=keywordId_str,
+            details={"timeout_duration": "unknown"}
+        )
+        print(f"❌ Agent timeout for keywordId: {keywordId_str}")
+        return {
+            "status": "failed",
+            "reason": "Agent execution timed out",
+            "keywordId": keywordId_str
+        }
+    
+    except Exception as e:
+        trackError(
+            component="FullAutoAgent",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            keywordId=keywordId_str,
+            details={
+                "exception_type": type(e).__name__,
+                "traceback": __import__('traceback').format_exc()
+            }
+        )
+        print(f"❌ Error in FullAutoAgent: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "failed",
+            "reason": str(e),
+            "keywordId": keywordId_str
+        }
 
 
 # Stored Keyword in mongoDB

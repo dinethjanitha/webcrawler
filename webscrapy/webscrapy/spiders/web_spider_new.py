@@ -39,7 +39,7 @@ class WebCrawSpider(scrapy.Spider):
         'RETRY_TIMES': 2,
         'LOG_LEVEL': 'INFO',
         'CLOSESPIDER_TIMEOUT': 0,
-        'CLOSESPIDER_PAGECOUNT': 5,  # Disabled, manual limit
+        'CLOSESPIDER_PAGECOUNT': 3,  # Disabled, manual limit
     }
 
     def __init__(self, start_urls=None, keywordId=None, *args, **kwargs):
@@ -68,7 +68,7 @@ class WebCrawSpider(scrapy.Spider):
         self.fail_count = 0
         self.visited_urls = set()  # URLs visited in THIS session only
         self.queued_urls = set()
-        self.max_pages = 100
+        self.max_pages = 3
         
         # Determine crawl mode
         if len(self.start_urls) == 1:
