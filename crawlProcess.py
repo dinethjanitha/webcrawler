@@ -76,7 +76,7 @@ def trackError(component: str, error_type: str, error_message: str, keywordId: s
     
     # Print formatted error
     print("\n" + "🔴" * 40)
-    print(f"❌ ERROR TRACKED:")
+    print(f" ERROR TRACKED:")
     print(f"   Component: {component}")
     print(f"   Type: {error_type}")
     print(f"   Message: {error_message}")
@@ -195,7 +195,7 @@ def chunkText(text: str, chunk_size: int = MAX_CHUNK_SIZE, overlap: int = CHUNK_
             break
         start = end - overlap
     
-    print(f"   ✅ Created {len(chunks)} chunks")
+    print(f"    Created {len(chunks)} chunks")
     return chunks
 
 
@@ -628,18 +628,18 @@ async def getCrawlContent(keywordId:str) -> str:
         if 'content' in document and document['content']:
             content.append(str(document['content']))
     
-    print(f"📊 Found {len(content)} documents in database")
+    print(f"Found {len(content)} documents in database")
     
     if len(content) > 0:
         # Join all content from all documents
         joinAllContent = "".join(content)
         content_length = len(joinAllContent)
-        print(f"📝 Total content length: {content_length} characters")
+        print(f"Total content length: {content_length} characters")
         print(f"   Preview (first 200 chars): {joinAllContent[:200]}...")
         
         # Check if content needs chunking - if so, process it here
         if content_length > MAX_CHUNK_SIZE:
-            print(f"⚠️  Content exceeds {MAX_CHUNK_SIZE} chars - chunking and processing here")
+            print(f"Content exceeds {MAX_CHUNK_SIZE} chars - chunking and processing here")
             
             # Create chunks
             chunks = chunkText(joinAllContent, MAX_CHUNK_SIZE, CHUNK_OVERLAP)
@@ -648,19 +648,19 @@ async def getCrawlContent(keywordId:str) -> str:
             all_partial_kgs = []
             
             for i, chunk in enumerate(chunks):
-                print(f"\n   📦 Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)...")
+                print(f"\n   Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)...")
                 
                 try:
                     partial_kg = processChunkToKG(chunk, keywordId, i+1, len(chunks))
                     if partial_kg and (partial_kg.get("nodes") or partial_kg.get("edges")):
                         all_partial_kgs.append(partial_kg)
-                        print(f"   ✅ Chunk {i+1}: {len(partial_kg.get('nodes', []))} nodes, {len(partial_kg.get('edges', []))} edges")
+                        print(f"Chunk {i+1}: {len(partial_kg.get('nodes', []))} nodes, {len(partial_kg.get('edges', []))} edges")
                     else:
-                        print(f"   ⚠️  Chunk {i+1}: No KG data extracted")
+                        print(f"    Chunk {i+1}: No KG data extracted")
                         
                 except Exception as e:
                     error_msg = f"Failed to process chunk {i+1}/{len(chunks)}: {str(e)}"
-                    print(f"   ❌ {error_msg}")
+                    print(f"    {error_msg}")
                     trackError(
                         component="getCrawlContent",
                         error_type="ChunkProcessingError",
@@ -678,17 +678,17 @@ async def getCrawlContent(keywordId:str) -> str:
             
             # Merge all partial KGs and return as JSON string
             if all_partial_kgs:
-                print(f"\n   🔗 Merging {len(all_partial_kgs)} partial knowledge graphs...")
+                print(f"\n    Merging {len(all_partial_kgs)} partial knowledge graphs...")
                 merged_kg = mergeKGJsons(all_partial_kgs)
-                print(f"   ✅ Final merged KG: {len(merged_kg.get('nodes', []))} nodes, {len(merged_kg.get('edges', []))} edges")
+                print(f"    Final merged KG: {len(merged_kg.get('nodes', []))} nodes, {len(merged_kg.get('edges', []))} edges")
                 
                 # Save to Neo4j immediately after merging
-                print(f"\n   💾 Saving merged KG to Neo4j...")
+                print(f"\n    Saving merged KG to Neo4j...")
                 try:
                     saveKGToNeo4j(keywordId, merged_kg)
-                    print(f"   ✅ Successfully saved to Neo4j!")
+                    print(f"    Successfully saved to Neo4j!")
                 except Exception as e:
-                    print(f"   ❌ Failed to save to Neo4j: {str(e)}")
+                    print(f"    Failed to save to Neo4j: {str(e)}")
                     trackError(
                         component="getCrawlContent->saveKGToNeo4j",
                         error_type=type(e).__name__,
@@ -706,16 +706,16 @@ async def getCrawlContent(keywordId:str) -> str:
                     "kg_data": merged_kg
                 })
             else:
-                print(f"   ❌ All chunks failed to produce valid KG data")
+                print(f"    All chunks failed to produce valid KG data")
                 return json.dumps({
                     "already_processed": True,
                     "kg_data": {"nodes": [], "edges": [], "error": "All chunks failed"}
                 })
         else:
-            print(f"✅ Content size OK ({content_length} chars) - returning for normal processing")
+            print(f" Content size OK ({content_length} chars) - returning for normal processing")
             return joinAllContent
     else:
-        print("❌ No content found in database")
+        print(" No content found in database")
         return ""
     
 
@@ -732,14 +732,14 @@ def createKG(content:str , keywordId:str) -> object:
     try:
         parsed_content = json.loads(content)
         if isinstance(parsed_content, dict) and parsed_content.get("already_processed"):
-            print("✅ Content was already chunked, processed, and saved by getCrawlContent")
+            print(" Content was already chunked, processed, and saved by getCrawlContent")
             json_out = parsed_content.get("kg_data", {"nodes": [], "edges": []})
             
             if json_out.get("nodes") or json_out.get("edges"):
-                print(f"✅ KG already saved in Neo4j: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
+                print(f" KG already saved in Neo4j: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
                 return json_out
             else:
-                print("⚠️  Pre-processed KG is empty")
+                print(" Pre-processed KG is empty")
                 return json_out
     except (json.JSONDecodeError, TypeError):
         # Not pre-processed JSON, continue with normal flow
@@ -747,7 +747,7 @@ def createKG(content:str , keywordId:str) -> object:
     
     # Validate content before processing
     if not content or len(content.strip()) < 10:
-        error_msg = f"❌ Content is empty or too short (length: {len(content) if content else 0})"
+        error_msg = f" Content is empty or too short (length: {len(content) if content else 0})"
         print(error_msg)
         trackError(
             component="createKG",
@@ -764,17 +764,17 @@ def createKG(content:str , keywordId:str) -> object:
         }
     
     content_length = len(content)
-    print(f"✅ Processing content: {content_length} characters")
+    print(f" Processing content: {content_length} characters")
     print(f"   First 200 chars: {content[:200]}...")
     
     # Process directly (content is small enough)
     print(f"   Content size OK - processing without chunking")
     try:
         json_out = processChunkToKG(content, keywordId, 1, 1)
-        print(f"✅ KG JSON validated: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
+        print(f" KG JSON validated: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
     except Exception as e:
         error_msg = f"Failed to process content: {str(e)}"
-        print(f"❌ {error_msg}")
+        print(f" {error_msg}")
         trackError(
             component="createKG",
             error_type=type(e).__name__,
@@ -796,9 +796,9 @@ def createKG(content:str , keywordId:str) -> object:
         print(f"🔄 Calling saveKGToNeo4j with keywordId={keywordId}")
         print(f"   KG contains: {len(json_out.get('nodes', []))} nodes, {len(json_out.get('edges', []))} edges")
         saveKGToNeo4j(keywordId, json_out)
-        print(f"✅ saveKGToNeo4j completed without exceptions")
+        print(f" saveKGToNeo4j completed without exceptions")
     except Exception as e:
-        print(f"❌ Exception caught from saveKGToNeo4j: {type(e).__name__}: {str(e)}")
+        print(f" Exception caught from saveKGToNeo4j: {type(e).__name__}: {str(e)}")
         trackError(
             component="createKG->saveKGToNeo4j",
             error_type=type(e).__name__,
@@ -821,19 +821,19 @@ def saveKGToNeo4j(keywordId: str, kg_json: dict):
     
     # Validate KG data before saving
     if not kg_json or not isinstance(kg_json, dict):
-        print("❌ Invalid KG JSON structure")
+        print(" Invalid KG JSON structure")
         return
     
     nodes = kg_json.get("nodes", [])
     edges = kg_json.get("edges", [])
     
-    print(f"📊 Preparing to merge:")
+    print(f" Preparing to merge:")
     print(f"   - {len(nodes)} nodes")
     print(f"   - {len(edges)} edges")
     print(f"   - KeywordId: {keywordId}")
     
     if not nodes and not edges:
-        print("⚠️  No nodes or edges to save")
+        print(" No nodes or edges to save")
         return
 
     with GraphDatabase.driver(URI, auth=AUTH) as driver:
@@ -865,10 +865,10 @@ def saveKGToNeo4j(keywordId: str, kg_json: dict):
                             nodes_created += 1
                         
                     except Exception as e:
-                        print(f"   ⚠️  Failed to merge node {i+1}: {name} - {str(e)}")
+                        print(f"    Failed to merge node {i+1}: {name} - {str(e)}")
                         continue
                 
-                print(f"✅ Merged {nodes_created}/{len(nodes)} nodes (created or updated)")
+                print(f" Merged {nodes_created}/{len(nodes)} nodes (created or updated)")
 
                 # MERGE relationships instead of CREATE
                 edges_created = 0
@@ -881,7 +881,7 @@ def saveKGToNeo4j(keywordId: str, kg_json: dict):
                     props["to"] = edge.get("to", "")
                     
                     if not props["from"] or not props["to"]:
-                        print(f"   ⚠️  Skipping edge {i+1}: missing from/to nodes")
+                        print(f"    Skipping edge {i+1}: missing from/to nodes")
                         continue
 
                     try:
@@ -899,14 +899,14 @@ def saveKGToNeo4j(keywordId: str, kg_json: dict):
                             edges_created += 1
                             
                     except Exception as e:
-                        print(f"   ⚠️  Failed to merge edge {i+1}: {props['from']} -> {props['to']} - {str(e)}")
+                        print(f"    Failed to merge edge {i+1}: {props['from']} -> {props['to']} - {str(e)}")
                         continue
                 
-                print(f"✅ Merged {edges_created}/{len(edges)} edges (created or updated)")
-                print(f"✅ Successfully merged KG to Neo4j!")
+                print(f" Merged {edges_created}/{len(edges)} edges (created or updated)")
+                print(f" Successfully merged KG to Neo4j!")
 
             except Exception as e:
-                print(f"❌ Neo4j error: {e}")
+                print(f" Neo4j error: {e}")
                 import traceback
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"Neo4j error: {e}")
@@ -1000,7 +1000,7 @@ async def FullAutoAgent(keywordId):
         
         # Log successful execution
         messages = response.get("messages", [])
-        print(f"\n✅ Agent completed successfully with {len(messages)} messages")
+        print(f"\n Agent completed successfully with {len(messages)} messages")
         
         return response
 
@@ -1012,7 +1012,7 @@ async def FullAutoAgent(keywordId):
             keywordId=keywordId_str,
             details={"timeout_duration": "unknown"}
         )
-        print(f"❌ Agent timeout for keywordId: {keywordId_str}")
+        print(f" Agent timeout for keywordId: {keywordId_str}")
         return {
             "status": "failed",
             "reason": "Agent execution timed out",
@@ -1030,7 +1030,7 @@ async def FullAutoAgent(keywordId):
                 "traceback": __import__('traceback').format_exc()
             }
         )
-        print(f"❌ Error in FullAutoAgent: {e}")
+        print(f" Error in FullAutoAgent: {e}")
         import traceback
         traceback.print_exc()
         return {
